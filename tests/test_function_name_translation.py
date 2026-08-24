@@ -219,3 +219,52 @@ class TestShorteningSurvivesUnknownHeads:
                                              rewrite=rewrite_as_standard_sympy)
         assert code == 'EulerGamma*log(x) + expint(2, x)'
         assert 'EulerGamma' in FFLConverter.generated_code_sympy_names()
+
+
+class TestShorteningQualifiesShadowedNames:
+    def test_eulers_number_prints_qualified(self):
+        # Bare E is kept out of the shortening namespace (it could be a coefficient),
+        # so an answer containing it used to fail the round-trip and stay verbose.
+        ns = {}
+        code, _, _ = ffl_to_sympy_short_code(['Times', '2', 'E', ['Power', 'r', '2']], {}, ns)
+        assert code == '2*sympy.E*r**2'
+        assert eval(code, ns) == 2 * sympy.E * Symbol('r')**2
+
+    def test_coefficient_named_like_a_wolfram_node_prints_as_symbol(self):
+        # Rubi's (A + B x + C x^2 + D x^3): ``D`` is also the Wolfram D node, which
+        # is what the bare name resolves to in the shortening namespace.
+        ns = {}
+        code, _, _ = ffl_to_sympy_short_code(['Plus', 'A', ['Times', 'D', 'x']], {'x': 'x'}, ns)
+        assert code == "A + Symbol('D')*x"
+        assert eval(code, ns) == Symbol('A') + Symbol('D') * x
+
+
+class TestDerivativeHead:
+    @staticmethod
+    def _eval_with_f(ffl):
+        # The arbitrary f is an undefined function, so (unlike the other heads
+        # here) sympy.Function('f') IS the correct emission.
+        ns = {}
+        code, _, _ = ffl_to_sympy_short_code(ffl, {'x': 'x'}, ns)
+        return eval(code, ns)
+
+    def test_first_derivative_of_an_arbitrary_function(self):
+        # f'[x] parses to [[['Derivative', '1'], 'f'], 'x']
+        f = sympy.Function('f')
+        assert self._eval_with_f([[['Derivative', '1'], 'f'], 'x']) == sympy.Derivative(f(x), x)
+
+    def test_higher_order_is_shortened_and_round_trips(self):
+        ns = {}
+        code, _, _ = ffl_to_sympy_short_code([[['Derivative', '2'], 'f'], 'x'], {'x': 'x'}, ns)
+        assert code == "Derivative(sympy.Function('f')(x), (x, 2))"
+        assert eval(code, ns) == sympy.Derivative(sympy.Function('f')(x), (x, 2))
+
+    def test_order_zero_is_the_function_itself(self):
+        assert self._eval_with_f([[['Derivative', '0'], 'f'], 'x']) == sympy.Function('f')(x)
+
+    def test_symbolic_and_negative_orders_are_still_rejected(self):
+        import pytest
+        c = FFLConverter(reserved_symbols={'x': 'x'})
+        for order in ('m', '-1'):
+            with pytest.raises(ValueError, match='Non-string function head'):
+                c.convert([[['Derivative', order], 'f'], 'x'])

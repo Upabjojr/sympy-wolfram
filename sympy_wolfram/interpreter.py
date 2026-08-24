@@ -55,12 +55,25 @@ class _WildStrPrinter(StrPrinter):
     # re-evaluated: print those qualified. Set per call by :func:`_simplify_code`;
     # the module-level instance keeps it empty.
     _qualify_undefined: FrozenSet[str] = frozenset()
+    # Names of plain Symbols that the evaluating namespace binds to SOMETHING ELSE
+    # (a coefficient named ``D`` vs the Wolfram ``D`` node): print ``Symbol('D')``.
+    _qualify_symbols: FrozenSet[str] = frozenset()
 
     def _print_WildSymbol(self, expr):
         name = expr.wildcard_name
         if expr.optional_value is not None:
             return f'_{name}_'
         return f'{name}_'
+
+    def _print_Symbol(self, expr):
+        if expr.name in self._qualify_symbols:
+            return f"Symbol('{expr.name}')"
+        return super()._print_Symbol(expr)
+
+    def _print_Exp1(self, expr):
+        # Bare ``E`` is deliberately NOT in the shortening namespace (it could be a
+        # coefficient symbol), so print the constant qualified.
+        return 'sympy.E'
 
     def _print_AppliedUndef(self, expr):
         name = type(expr).__name__
@@ -203,7 +216,7 @@ class FFLConverter:
         # discarded.
         'Ei', 'li', 'LambertW',
         'gamma', 'uppergamma', 'factorial', 'zeta', 'polygamma', 'besselj', 'expint',
-        'elliptic_pi',
+        'elliptic_pi', 'Derivative',
         # The printer emits this constant BARE (unlike ``sympy.E``, it cannot collide
         # with a coefficient symbol); without it every expression containing
         # EulerGamma failed the round-trip and stayed verbose.
@@ -453,6 +466,15 @@ class FFLConverter:
             return repr(ffl)
 
         head = ffl[0]
+
+        # -- Derivative[n, ...][f][args] (f'[x], f''[x]) --------------------------
+        # A nested head: the parser gives [[['Derivative', '1'], 'f'], 'x']. With
+        # non-negative integer orders this is sympy.Derivative(f(args), (arg, n), ...).
+        # Symbolic or negative orders (Derivative[m][f], Mathematica's antiderivative
+        # Derivative[-1][f]) have no SymPy counterpart and fall through to the error.
+        deriv = self._derivative_to_code(head, ffl[1:], is_pattern)
+        if deriv is not None:
+            return deriv
 
         # Non-string head (e.g., F_[x_]) -- unsupported
         if not isinstance(head, str):
@@ -856,6 +878,23 @@ class FFLConverter:
         args = [self.convert(a, is_pattern=is_pattern) for a in ffl[1:]]
         return f"Lambda({', '.join(args)})"
 
+    def _derivative_to_code(self, head, args, is_pattern: bool) -> Optional[str]:
+        """Code for ``Derivative[n1, ...][f][args]``, or None if *head* is not one."""
+        if not (isinstance(head, list) and len(head) == 2
+                and isinstance(head[0], list) and head[0] and head[0][0] == 'Derivative'
+                and isinstance(head[1], str)):
+            return None
+        orders = head[0][1:]
+        if len(orders) != len(args) or not all(
+                isinstance(o, str) and o.isdigit() for o in orders):
+            return None
+        func = self.convert([head[1]] + list(args), is_pattern=is_pattern)
+        arg_codes = [self.convert(a, is_pattern=is_pattern) for a in args]
+        spec = [f"({a}, {int(o)})" for a, o in zip(arg_codes, orders) if int(o) > 0]
+        if not spec:
+            return func
+        return f"sympy.Derivative({func}, {', '.join(spec)})"
+
     @staticmethod
     def _collect_slots(ffl) -> Set[str]:
         """Recursively collect all Slot numbers from an FFL subtree."""
@@ -1004,9 +1043,15 @@ def _simplify_code(code: str, ns: Dict[str, Any],
         if isinstance(obj, sympy.Basic) and isinstance(printer, _WildStrPrinter):
             unknown = frozenset(type(f).__name__ for f in obj.atoms(AppliedUndef)
                                 if type(f).__name__ not in ns)
-            if unknown:
+            # Likewise a plain Symbol whose name the namespace binds to something
+            # else (a coefficient ``D`` vs the Wolfram ``D`` node).
+            shadowed = frozenset(
+                s_.name for s_ in obj.atoms(Symbol)
+                if type(s_) is Symbol and s_.name in ns and ns[s_.name] != s_)
+            if unknown or shadowed:
                 printer = type(printer)()
                 printer._qualify_undefined = unknown
+                printer._qualify_symbols = shadowed
         short = printer.doprint(obj)
         recovered = eval(short, ns)
         if isinstance(recovered, sympy.Basic):
