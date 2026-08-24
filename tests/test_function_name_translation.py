@@ -189,3 +189,33 @@ class TestWildcardArgumentsAreNotEvaluatedAway:
         got, ns = self._pattern(['Expand', self.P('u'), 'x'])
         assert isinstance(got, Expand)
         assert got.args == (ns['u_'], x)
+
+
+class TestShorteningSurvivesUnknownHeads:
+    """A Rubi marker (Unintegrable[...]) or an arbitrary F[x] in an answer used to make
+    the shortening round-trip raise NameError, so the whole answer stayed verbose --
+    and the rewrite to standard SymPy was silently lost with it."""
+
+    def test_marker_head_is_qualified_and_the_rest_is_rewritten(self):
+        ffl = ['Plus', ['Unintegrable', ['Power', 'x', 'x'], 'x'], ['Gamma', 'a', 'x']]
+        ns = {}
+        code, _, _ = ffl_to_sympy_short_code(ffl, {'x': 'x'}, ns,
+                                             rewrite=rewrite_as_standard_sympy)
+        assert code == "sympy.Function('Unintegrable')(x**x, x) + uppergamma(a, x)"
+        assert eval(code, ns) == sympy.uppergamma(a, x) + sympy.Function('Unintegrable')(x**x, x)
+
+    def test_registered_placeholders_keep_their_bare_call_form(self):
+        # Rubi utilities / constraint predicates are registered by the caller as
+        # unevaluated Function placeholders and must still print as FreeQ(a, x).
+        ns = {'FreeQ': sympy.Function('FreeQ')}
+        code, _, _ = ffl_to_sympy_short_code(['FreeQ', 'a', 'x'], {'x': 'x'}, ns,
+                                             custom_functions={'FreeQ': ('FreeQ', ns['FreeQ'])})
+        assert code == 'FreeQ(a, x)'
+
+    def test_euler_gamma_is_in_the_shortening_namespace(self):
+        ffl = ['Plus', ['Times', 'EulerGamma', ['Log', 'x']], ['ExpIntegralE', '2', 'x']]
+        ns = {}
+        code, _, _ = ffl_to_sympy_short_code(ffl, {'x': 'x'}, ns,
+                                             rewrite=rewrite_as_standard_sympy)
+        assert code == 'EulerGamma*log(x) + expint(2, x)'
+        assert 'EulerGamma' in FFLConverter.generated_code_sympy_names()

@@ -22,10 +22,11 @@ from __future__ import annotations
 
 import keyword
 import warnings
-from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
+from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Set, Tuple
 
 import sympy
 from sympy import Integer, Rational, Symbol
+from sympy.core.function import AppliedUndef
 from sympy.printing.str import StrPrinter
 
 from sympy_matching.wild import (HeadRef, IDENTITY_ELEMENT, WildHeadApp, WildHeadDeriv,
@@ -49,11 +50,24 @@ class _WildStrPrinter(StrPrinter):
     Optional WildSymbol('m', optional_value=IDENTITY_ELEMENT) -> ``_m_``
     """
 
+    # Names of undefined functions (``sympy.Function('Head')`` placeholders) that the
+    # evaluating namespace does NOT define, so a bare ``Head(...)`` could not be
+    # re-evaluated: print those qualified. Set per call by :func:`_simplify_code`;
+    # the module-level instance keeps it empty.
+    _qualify_undefined: FrozenSet[str] = frozenset()
+
     def _print_WildSymbol(self, expr):
         name = expr.wildcard_name
         if expr.optional_value is not None:
             return f'_{name}_'
         return f'{name}_'
+
+    def _print_AppliedUndef(self, expr):
+        name = type(expr).__name__
+        if name in self._qualify_undefined:
+            args = ', '.join(self._print(a) for a in expr.args)
+            return f"sympy.Function('{name}')({args})"
+        return super()._print_Function(expr)
 
     def _print_Half(self, expr):
         return "sympy.S.Half"
@@ -190,6 +204,10 @@ class FFLConverter:
         'Ei', 'li', 'LambertW',
         'gamma', 'uppergamma', 'factorial', 'zeta', 'polygamma', 'besselj', 'expint',
         'elliptic_pi',
+        # The printer emits this constant BARE (unlike ``sympy.E``, it cannot collide
+        # with a coefficient symbol); without it every expression containing
+        # EulerGamma failed the round-trip and stayed verbose.
+        'EulerGamma',
     )
 
     # Map targets that must NOT be exposed as bare names: the generated header binds
@@ -248,8 +266,8 @@ class FFLConverter:
         """
         names: Dict[str, Any] = {}
         # Functions and relational heads reachable through the translation maps. The
-        # CONSTANT_MAP is deliberately NOT included: pi/I/oo are covered by the extras
-        # below, while E / EulerGamma stay qualified (``sympy.E``) -- a bare ``E`` would
+        # CONSTANT_MAP is deliberately NOT included: pi/I/oo/EulerGamma are covered by
+        # the extras below, while E stays qualified (``sympy.E``) -- a bare ``E`` would
         # both be dead weight and risk colliding with a coefficient symbol named E.
         for target in list(cls.SYMPY_FUNC_MAP.values()) + list(cls.SYMPY_LOGIC_MAP.values()):
             if not target.startswith('sympy.'):
@@ -977,6 +995,18 @@ def _simplify_code(code: str, ns: Dict[str, Any],
             # verifies the printed text against `obj`, so rewriting afterwards would
             # always compare unequal and silently discard the result.
             obj = rewrite(obj)
+        # An undefined function the namespace does not know (a Rubi marker such as
+        # Unintegrable[...], an arbitrary F[x]) prints bare as ``Unintegrable(...)``,
+        # which the round-trip cannot evaluate -- so the WHOLE expression used to
+        # stay verbose, and the rewrite above was silently lost with it. Print those
+        # heads qualified instead; placeholders the caller registered (FreeQ, ...)
+        # are in the namespace and keep their bare call-form.
+        if isinstance(obj, sympy.Basic) and isinstance(printer, _WildStrPrinter):
+            unknown = frozenset(type(f).__name__ for f in obj.atoms(AppliedUndef)
+                                if type(f).__name__ not in ns)
+            if unknown:
+                printer = type(printer)()
+                printer._qualify_undefined = unknown
         short = printer.doprint(obj)
         recovered = eval(short, ns)
         if isinstance(recovered, sympy.Basic):
