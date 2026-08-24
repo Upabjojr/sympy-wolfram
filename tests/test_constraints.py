@@ -13,11 +13,8 @@ Covers (without importing rubi_integrate):
 - Hash consistency (equal objects have equal hashes)
 - JSON round-trip via sympy_matching.json_ext
 """
-import sys
-import os
 import ast
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 import pytest
 import sympy
