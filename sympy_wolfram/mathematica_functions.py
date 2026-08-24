@@ -367,6 +367,27 @@ class Together(MathematicaExpr):
         return sympy.together(expr)
 
 
+class Expand(MathematicaExpr):
+    """Mathematica ``Expand[expr]`` -> multiply out products and powers.
+
+    Deferred like :class:`Together`, so that in a rule it runs on the substituted
+    expression rather than on the wildcards. Its standard-SymPy form is the eager
+    ``expand(expr)``: ``Expand`` is an instruction to the CAS, and the value it
+    denotes IS the expanded argument.
+    """
+
+    def __new__(cls, expr):
+        return Expr.__new__(cls, sympy.sympify(expr))
+
+    def _evaluate(self, **kwargs):
+        expr, = self.args
+        return sympy.expand(expr)
+
+    def rewrite_as_standard_sympy(self):
+        expr, = self.args
+        return sympy.expand(expr)
+
+
 class GCD(MathematicaExpr):
     """Mathematica GCD[a, b, ...] -> greatest common divisor."""
 
@@ -425,6 +446,12 @@ class EllipticPi(MathematicaExpr):
         elif len(self.args) == 3:
             n, phi, m = self.args
             return sympy.elliptic_pi(n, phi, m)
+        return self
+
+    def rewrite_as_standard_sympy(self):
+        """Both arities map to ``elliptic_pi``, which is overloaded the same way."""
+        if len(self.args) in (2, 3):
+            return sympy.elliptic_pi(*self.args, evaluate=False)
         return self
 
 

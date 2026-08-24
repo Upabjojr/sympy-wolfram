@@ -126,7 +126,15 @@ class FFLConverter:
         'Abs': 'sympy.Abs',
         # Special functions
         'EllipticE': 'sympy.elliptic_e', 'EllipticF': 'sympy.elliptic_f',
+        'EllipticK': 'sympy.elliptic_k',
+        # EllipticPi has a node (arity-overloaded: [n, m] / [n, phi, m]).
         'AppellF1': 'sympy.appellf1',
+        # HypergeometricPFQ[{a1,..}, {b1,..}, z] -> hyper([a1,..], [b1,..], z): the
+        # List arguments are emitted as Python list literals, which hyper accepts.
+        # Without this entry the generic sympy.Function('HypergeometricPFQ') fallback
+        # was emitted, and it CRASHES at eval time on the list arguments -- every
+        # generated module containing pFq failed to import.
+        'HypergeometricPFQ': 'sympy.hyper',
         'Gamma': 'Gamma', 'LogGamma': 'sympy.loggamma',
         'Erf': 'sympy.erf',
         'Erfi': 'sympy.erfi', 'Erfc': 'sympy.erfc',
@@ -181,6 +189,7 @@ class FFLConverter:
         # discarded.
         'Ei', 'li', 'LambertW',
         'gamma', 'uppergamma', 'factorial', 'zeta', 'polygamma', 'besselj', 'expint',
+        'elliptic_pi',
     )
 
     # Map targets that must NOT be exposed as bare names: the generated header binds
@@ -496,6 +505,15 @@ class FFLConverter:
                 return f'sympy.atan2({y_arg}, {x_arg})'
             arg = self.convert(ffl[1], is_pattern=is_pattern)
             return f'sympy.atan({arg})'
+
+        # -- Log (1 or 2 args) -------------------------------------------------
+        # Mathematica Log[b, z] is the logarithm of z to base b; SymPy's log(z, b)
+        # takes the same two arguments in the OPPOSITE order. A bare name mapping
+        # would silently emit log(b, z) == log(b)/log(z), the reciprocal.
+        if head == 'Log' and len(ffl) == 3 and 'Log' not in self._custom_functions:
+            base = self.convert(ffl[1], is_pattern=is_pattern)
+            z = self.convert(ffl[2], is_pattern=is_pattern)
+            return f'sympy.log({z}, {base})'
 
         # -- Hypergeometric2F1 -------------------------------------------------
         if head == 'Hypergeometric2F1' and len(ffl) == 5:

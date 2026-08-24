@@ -1,0 +1,142 @@
+# -*- coding: utf-8 -*-
+"""Wolfram heads must translate to a name that EVALUATES in generated code.
+
+Regression tests for heads that used to fall through to the generic
+``sympy.Function('Head')`` placeholder -- or worse, to a SymPy function with a
+different argument convention -- when the Rubi test suite was generated. Every head
+that occurs in the Rubi *MathematicaSyntaxTestSuite* answers is checked here.
+"""
+import sympy
+from sympy import Symbol, symbols
+
+from sympy_wolfram import ffl_to_sympy_short_code
+from sympy_wolfram.interpreter import FFLConverter, ffl_to_sympy_code
+from sympy_wolfram.objects import rewrite_as_standard_sympy
+
+x = Symbol('x')
+a, b, c, m, n, s = symbols('a b c m n s')
+
+
+def _eval(ffl, rewrite=None):
+    ns = {}
+    code, _, _ = ffl_to_sympy_short_code(ffl, {'x': 'x'}, ns, rewrite=rewrite)
+    assert 'sympy.Function(' not in code, code
+    return eval(code, ns)
+
+
+# Heads found in the Rubi test-suite answers, with the SymPy object each must
+# evaluate to. They were emitted as ``sympy.Function('Head')`` placeholders by an
+# older generator, leaving 16% of the suite's expected answers unusable.
+RUBI_SUITE_HEADS = [
+    (['PolyLog', '2', 'x'], sympy.polylog(2, x)),
+    (['Erf', 'x'], sympy.erf(x)),
+    (['Erfi', 'x'], sympy.erfi(x)),
+    (['Erfc', 'x'], sympy.erfc(x)),
+    (['FresnelS', 'x'], sympy.fresnels(x)),
+    (['FresnelC', 'x'], sympy.fresnelc(x)),
+    (['SinIntegral', 'x'], sympy.Si(x)),
+    (['CosIntegral', 'x'], sympy.Ci(x)),
+    (['SinhIntegral', 'x'], sympy.Shi(x)),
+    (['CoshIntegral', 'x'], sympy.Chi(x)),
+    (['LogGamma', 'x'], sympy.loggamma(x)),
+    (['EllipticE', 'm'], sympy.elliptic_e(m)),
+    (['EllipticE', 'x', 'm'], sympy.elliptic_e(x, m)),
+    (['EllipticF', 'x', 'm'], sympy.elliptic_f(x, m)),
+    (['EllipticK', 'm'], sympy.elliptic_k(m)),
+    (['Hypergeometric2F1', 'a', 'b', 'c', 'x'], sympy.hyper([a, b], [c], x)),
+    (['HypergeometricPFQ', ['List', 'a', 'b'], ['List', 'c'], 'x'],
+     sympy.hyper([a, b], [c], x)),
+    (['HypergeometricPFQ', ['List', 'a', 'b', 'c'], ['List', 'm', 'n'], 'x'],
+     sympy.hyper([a, b, c], [m, n], x)),
+    (['AppellF1', 'a', 'b', 'c', 'm', 'x', 'n'], sympy.appellf1(a, b, c, m, x, n)),
+]
+
+# Heads this package implements as its own node: the node is what gets emitted,
+# and ``rewrite_as_standard_sympy`` gives the SymPy equivalent.
+RUBI_SUITE_NODE_HEADS = [
+    (['Gamma', 'x'], sympy.gamma(x)),
+    (['Gamma', 'a', 'x'], sympy.uppergamma(a, x)),
+    (['EllipticPi', 'n', 'm'], sympy.elliptic_pi(n, m)),
+    (['EllipticPi', 'n', 'x', 'm'], sympy.elliptic_pi(n, x, m)),
+    (['ProductLog', 'x'], sympy.LambertW(x)),
+    (['ProductLog', '-1', 'x'], sympy.LambertW(x, -1)),
+    (['ExpIntegralEi', 'x'], sympy.Ei(x)),
+    (['ExpIntegralE', 'n', 'x'], sympy.expint(n, x)),
+    (['LogIntegral', 'x'], sympy.li(x)),
+    (['Zeta', 's'], sympy.zeta(s)),
+    (['Zeta', 's', 'a'], sympy.zeta(s, a)),
+    (['PolyGamma', 'n', 'x'], sympy.polygamma(n, x)),
+    (['BesselJ', 'n', 'x'], sympy.besselj(n, x)),
+    (['Factorial', 'n'], sympy.factorial(n)),
+    (['Expand', ['Times', 'x', ['Plus', 'x', '1']]], x**2 + x),
+]
+
+
+class TestRubiSuiteHeadsTranslate:
+    def test_sympy_heads_evaluate_to_the_sympy_function(self):
+        for ffl, expected in RUBI_SUITE_HEADS:
+            assert _eval(ffl) == expected, ffl
+
+    def test_node_heads_evaluate_to_a_wolfram_node(self):
+        from sympy_wolfram.objects import MathematicaExpr
+        for ffl, _ in RUBI_SUITE_NODE_HEADS:
+            got = _eval(ffl)
+            assert isinstance(got, MathematicaExpr), (ffl, got)
+            assert type(got).__name__ == ffl[0]
+
+    def test_node_heads_rewrite_to_standard_sympy(self):
+        for ffl, expected in RUBI_SUITE_NODE_HEADS:
+            assert _eval(ffl, rewrite=rewrite_as_standard_sympy) == expected, ffl
+
+    def test_rewritten_code_is_shortened_not_verbose(self):
+        """Every SymPy name a rewrite can produce must be in the shortening namespace,
+        or the round-trip fails and the verbose node code is emitted instead."""
+        for ffl, _ in RUBI_SUITE_NODE_HEADS:
+            code, _, _ = ffl_to_sympy_short_code(ffl, {'x': 'x'},
+                                                 rewrite=rewrite_as_standard_sympy)
+            assert "Symbol('" not in code, (ffl, code)
+
+
+class TestHypergeometricPFQ:
+    def test_list_arguments_become_hyper_parameter_lists(self):
+        c = FFLConverter(reserved_symbols={'x': 'x'})
+        code = c.convert(['HypergeometricPFQ', ['List', 'a', 'b'], ['List', 'c'], 'x'])
+        assert code == "sympy.hyper([Symbol('a'), Symbol('b')], [Symbol('c')], x)"
+
+    def test_the_old_placeholder_could_not_even_be_evaluated(self):
+        # The generic fallback crashed on the Python-list arguments, which is why
+        # every generated test-suite module containing a pFq failed to import.
+        import pytest
+        with pytest.raises(AttributeError):
+            sympy.Function('HypergeometricPFQ')([a, b], [c], x)
+
+
+class TestLogArgumentOrder:
+    def test_one_argument_log(self):
+        assert _eval(['Log', 'x']) == sympy.log(x)
+
+    def test_two_argument_log_is_base_first_in_mathematica(self):
+        # Log[b, z] == log_b(z); sympy.log(z, b) takes the arguments the other way.
+        assert _eval(['Log', '2', 'x']) == sympy.log(x, 2)
+        assert _eval(['Log', '2', 'x']) == sympy.log(x) / sympy.log(2)
+
+    def test_numeric_two_argument_log(self):
+        code, _, _ = ffl_to_sympy_code(['Log', '2', '8'])
+        assert eval(code, {'sympy': sympy, 'Integer': sympy.Integer}) == 3
+
+    def test_custom_function_override_still_wins(self):
+        c = FFLConverter(reserved_symbols={'x': 'x'},
+                         custom_functions={'Log': ('mylog', lambda *a: a)})
+        assert c.convert(['Log', '2', 'x']) == "mylog(Integer(2), x)"
+
+
+class TestExpandNode:
+    def test_is_deferred_and_evaluates_on_doit(self):
+        from sympy_wolfram.mathematica_functions import Expand
+        e = Expand(x * (x + 1))
+        assert e.args == (x * (x + 1),)
+        assert e.doit() == x**2 + x
+
+    def test_rewrite_is_the_expanded_argument(self):
+        from sympy_wolfram.mathematica_functions import Expand
+        assert Expand((x + 1)**2).rewrite_as_standard_sympy() == x**2 + 2*x + 1
