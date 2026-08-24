@@ -137,6 +137,55 @@ class TestExpandNode:
         assert e.args == (x * (x + 1),)
         assert e.doit() == x**2 + x
 
+    def test_two_argument_form_used_by_rubi(self):
+        # Rubi: Int[Expand[Sin[e + f*x]^m*(a + b*Tan[e + f*x])^n, x], x]
+        from sympy_wolfram.mathematica_functions import Expand
+        e = _eval(['Expand', ['Times', 'a', ['Plus', 'x', '1']], 'x'])
+        assert isinstance(e, Expand) and e.args == (a * (x + 1), x)
+        assert e.doit() == a * x + a
+        assert _eval(['Expand', ['Times', 'a', ['Plus', 'x', '1']], 'x'],
+                     rewrite=rewrite_as_standard_sympy) == a * x + a
+
     def test_rewrite_is_the_expanded_argument(self):
         from sympy_wolfram.mathematica_functions import Expand
         assert Expand((x + 1)**2).rewrite_as_standard_sympy() == x**2 + 2*x + 1
+
+
+class TestWildcardArgumentsAreNotEvaluatedAway:
+    """In a rule, the arguments are wildcards that may later match ANY expression, so
+    the emitted SymPy function must not treat them as constants and evaluate."""
+
+    @staticmethod
+    def _pattern(ffl):
+        ns = {}
+        code, defs, _ = ffl_to_sympy_code(ffl, {'x': 'x'}, ns)
+        for d in defs:
+            exec(d, ns)
+        return eval(code, ns), ns
+
+    P = staticmethod(lambda name: ['Pattern', name, ['Blank']])
+
+    def test_elliptic_k_of_a_wildcard_stays_a_call(self):
+        got, ns = self._pattern(['EllipticK', self.P('m')])
+        assert isinstance(got, sympy.elliptic_k)
+        assert got.args == (ns['m_'],)
+
+    def test_hyper_of_wildcards_keeps_its_parameter_lists(self):
+        got, ns = self._pattern(['HypergeometricPFQ', ['List', self.P('a'), self.P('b')],
+                                 ['List', self.P('c')], self.P('z')])
+        assert isinstance(got, sympy.hyper)
+        assert got.ap == (ns['a_'], ns['b_'])
+        assert got.bq == (ns['c_'],)
+        assert got.argument == ns['z_']
+
+    def test_two_argument_log_matches_mathematicas_own_evaluation(self):
+        # Mathematica itself evaluates Log[b, z] to Log[z]/Log[b], so the quotient
+        # is the faithful structure -- with the wildcards intact inside it.
+        got, ns = self._pattern(['Log', self.P('b'), self.P('z')])
+        assert got == sympy.log(ns['z_']) / sympy.log(ns['b_'])
+
+    def test_expand_of_a_wildcard_is_deferred(self):
+        from sympy_wolfram.mathematica_functions import Expand
+        got, ns = self._pattern(['Expand', self.P('u'), 'x'])
+        assert isinstance(got, Expand)
+        assert got.args == (ns['u_'], x)

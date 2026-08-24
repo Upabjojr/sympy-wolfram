@@ -368,24 +368,28 @@ class Together(MathematicaExpr):
 
 
 class Expand(MathematicaExpr):
-    """Mathematica ``Expand[expr]`` -> multiply out products and powers.
+    """Mathematica ``Expand[expr]`` / ``Expand[expr, patt]`` -> multiply out.
 
     Deferred like :class:`Together`, so that in a rule it runs on the substituted
-    expression rather than on the wildcards. Its standard-SymPy form is the eager
-    ``expand(expr)``: ``Expand`` is an instruction to the CAS, and the value it
-    denotes IS the expanded argument.
+    expression rather than on the wildcards (Rubi: ``Int[Expand[u, x], x]``). Its
+    standard-SymPy form is the eager ``expand(expr)``: ``Expand`` is an instruction
+    to the CAS, and the value it denotes IS the expanded argument.
+
+    The two-argument form restricts Mathematica's expansion to terms involving
+    ``patt``; here it expands fully, which is equal as an expression and only
+    differs in how the terms free of ``patt`` are laid out.
     """
 
-    def __new__(cls, expr):
-        return Expr.__new__(cls, sympy.sympify(expr))
+    def __new__(cls, expr, *patt):
+        if len(patt) > 1:
+            raise TypeError('Expand takes 1 or 2 arguments, got %d' % (1 + len(patt)))
+        return Expr.__new__(cls, sympy.sympify(expr), *[sympy.sympify(a) for a in patt])
 
     def _evaluate(self, **kwargs):
-        expr, = self.args
-        return sympy.expand(expr)
+        return sympy.expand(self.args[0])
 
     def rewrite_as_standard_sympy(self):
-        expr, = self.args
-        return sympy.expand(expr)
+        return sympy.expand(self.args[0])
 
 
 class GCD(MathematicaExpr):
