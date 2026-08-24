@@ -367,6 +367,31 @@ class Together(MathematicaExpr):
         return sympy.together(expr)
 
 
+class Expand(MathematicaExpr):
+    """Mathematica ``Expand[expr]`` / ``Expand[expr, patt]`` -> multiply out.
+
+    Deferred like :class:`Together`, so that in a rule it runs on the substituted
+    expression rather than on the wildcards (Rubi: ``Int[Expand[u, x], x]``). Its
+    standard-SymPy form is the eager ``expand(expr)``: ``Expand`` is an instruction
+    to the CAS, and the value it denotes IS the expanded argument.
+
+    The two-argument form restricts Mathematica's expansion to terms involving
+    ``patt``; here it expands fully, which is equal as an expression and only
+    differs in how the terms free of ``patt`` are laid out.
+    """
+
+    def __new__(cls, expr, *patt):
+        if len(patt) > 1:
+            raise TypeError('Expand takes 1 or 2 arguments, got %d' % (1 + len(patt)))
+        return Expr.__new__(cls, sympy.sympify(expr), *[sympy.sympify(a) for a in patt])
+
+    def _evaluate(self, **kwargs):
+        return sympy.expand(self.args[0])
+
+    def rewrite_as_standard_sympy(self):
+        return sympy.expand(self.args[0])
+
+
 class GCD(MathematicaExpr):
     """Mathematica GCD[a, b, ...] -> greatest common divisor."""
 
@@ -426,6 +451,12 @@ class EllipticPi(MathematicaExpr):
             n, phi, m = self.args
             return sympy.elliptic_pi(n, phi, m)
         return self
+
+    # Deliberately NO rewrite_as_standard_sympy: rubi_integrate keeps this node as a
+    # deferred placeholder in its rules exactly because it does not self-translate
+    # (its codegen checks the node's own __dict__). In standard-SymPy mode the
+    # interpreter maps the head straight to sympy.elliptic_pi instead
+    # (FFLConverter.STANDARD_SYMPY_FUNC_MAP), so the node never arises there.
 
 
 class Apply(MathematicaExpr):

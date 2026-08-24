@@ -22,10 +22,11 @@ from __future__ import annotations
 
 import keyword
 import warnings
-from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
+from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Set, Tuple
 
 import sympy
 from sympy import Integer, Rational, Symbol
+from sympy.core.function import AppliedUndef
 from sympy.printing.str import StrPrinter
 
 from sympy_matching.wild import (HeadRef, IDENTITY_ELEMENT, WildHeadApp, WildHeadDeriv,
@@ -49,11 +50,41 @@ class _WildStrPrinter(StrPrinter):
     Optional WildSymbol('m', optional_value=IDENTITY_ELEMENT) -> ``_m_``
     """
 
+    # Names of undefined functions (``sympy.Function('Head')`` placeholders) that the
+    # evaluating namespace does NOT define, so a bare ``Head(...)`` could not be
+    # re-evaluated: print those qualified. Set per call by :func:`_simplify_code`;
+    # the module-level instance keeps it empty.
+    _qualify_undefined: FrozenSet[str] = frozenset()
+    # Names of plain Symbols that the evaluating namespace binds to SOMETHING ELSE
+    # (a coefficient named ``D`` vs the Wolfram ``D`` node): print ``Symbol('D')``.
+    _qualify_symbols: FrozenSet[str] = frozenset()
+    # Print Euler's number as ``sympy.E`` (standard-SymPy mode; see _simplify_code).
+    _qualify_e: bool = False
+
     def _print_WildSymbol(self, expr):
         name = expr.wildcard_name
         if expr.optional_value is not None:
             return f'_{name}_'
         return f'{name}_'
+
+    def _print_Symbol(self, expr):
+        if expr.name in self._qualify_symbols:
+            return f"Symbol('{expr.name}')"
+        return super()._print_Symbol(expr)
+
+    def _print_Exp1(self, expr):
+        # Bare ``E`` is deliberately NOT in the shortening namespace (it could be a
+        # coefficient symbol), so in standard-SymPy mode print the constant qualified.
+        if self._qualify_e:
+            return 'sympy.E'
+        return super()._print_Exp1(expr)
+
+    def _print_AppliedUndef(self, expr):
+        name = type(expr).__name__
+        if name in self._qualify_undefined:
+            args = ', '.join(self._print(a) for a in expr.args)
+            return f"sympy.Function('{name}')({args})"
+        return super()._print_Function(expr)
 
     def _print_Half(self, expr):
         return "sympy.S.Half"
@@ -66,6 +97,15 @@ class _WildStrPrinter(StrPrinter):
 
 # Module-level printer instance (stateless)
 _wild_printer = _WildStrPrinter()
+
+
+def _is_numeric_atom(atom: str) -> bool:
+    """True for an FFL atom that is a number literal (``'2'``, ``'-1'``, ``'0.5'``)."""
+    try:
+        float(atom)
+        return True
+    except ValueError:
+        return False
 
 
 # =============================================================================
@@ -96,6 +136,15 @@ class FFLConverter:
         Additional ``{MathematicaHead: 'python.callable'}`` mappings.
     extra_constants : dict, optional
         Additional ``{MathematicaAtom: 'sympy.constant_code'}`` mappings.
+    standard_sympy : bool, optional
+        Translate heads and forms that only have an EAGER standard-SymPy equivalent
+        (``EllipticPi`` -> ``elliptic_pi``, ``Log[b, z]`` -> ``log(z, b)``,
+        ``Derivative[n][f][x]`` -> ``Derivative(f(x), (x, n))``, ...) and let the
+        shortening pass qualify names its namespace cannot resolve. Meant for
+        translating plain expressions (e.g. a test corpus). Off by default, because
+        in a rule the arguments are wildcards that may match any expression, and an
+        eager SymPy function may evaluate them as if they were constants; the
+        default translation is frozen so generated rule sets do not change.
     """
 
     # Type alias for custom_functions dict value
@@ -127,6 +176,13 @@ class FFLConverter:
         # Special functions
         'EllipticE': 'sympy.elliptic_e', 'EllipticF': 'sympy.elliptic_f',
         'AppellF1': 'sympy.appellf1',
+        # HypergeometricPFQ[{a1,..}, {b1,..}, z] -> hyper([a1,..], [b1,..], z): the
+        # List arguments are emitted as Python list literals, which hyper accepts.
+        # Without this entry the generic sympy.Function('HypergeometricPFQ') fallback
+        # was emitted, and it CRASHES at eval time on the list arguments -- every
+        # generated module containing pFq failed to import. (``hyper`` was already a
+        # generated name through Hypergeometric2F1, so this adds no new bare name.)
+        'HypergeometricPFQ': 'sympy.hyper',
         'Gamma': 'Gamma', 'LogGamma': 'sympy.loggamma',
         'Erf': 'sympy.erf',
         'Erfi': 'sympy.erfi', 'Erfc': 'sympy.erfc',
@@ -148,6 +204,20 @@ class FFLConverter:
         'FractionalPart': 'sympy.frac', 'IntegerPart': 'sympy.floor',
         # List functions:
         'Min': 'sympy.Min', 'Max': 'sympy.Max',
+    }
+
+    # Additional head -> SymPy callable translations applied ONLY in standard-SymPy
+    # mode (``standard_sympy=True``). They are eager SymPy functions; in the default
+    # mode these heads keep their deferred Wolfram node (EllipticPi) or the generic
+    # placeholder, exactly as before the mode existed, so rule generation for
+    # rubi_integrate -- whose patterns carry wildcards that an eager function might
+    # evaluate as if they were constants -- is unaffected.
+    STANDARD_SYMPY_FUNC_MAP: Dict[str, str] = {
+        'EllipticK': 'sympy.elliptic_k',
+        # Arity-overloaded like the node: [n, m] / [n, phi, m]; elliptic_pi is too.
+        'EllipticPi': 'sympy.elliptic_pi',
+        # Expand[expr] / Expand[expr, patt]: the value IS the expanded argument.
+        'Expand': 'sympy.expand',
     }
 
     # Mathematica predicates that map to native SymPy relational/logic objects
@@ -181,6 +251,20 @@ class FFLConverter:
         # discarded.
         'Ei', 'li', 'LambertW',
         'gamma', 'uppergamma', 'factorial', 'zeta', 'polygamma', 'besselj', 'expint',
+    )
+
+    # Names that join the above ONLY in standard-SymPy mode. Kept separate so that the
+    # default generated-name set -- and with it the ``from sympy import (...)`` header
+    # of every rubi_integrate rule module -- does not change.
+    _STANDARD_SYMPY_EXTRAS: Tuple[str, ...] = (
+        # Targets of STANDARD_SYMPY_FUNC_MAP.
+        'elliptic_k', 'elliptic_pi', 'expand',
+        # Derivative[n][f][x] -> Derivative(f(x), (x, n)); f'[Sin[x]] -> Subs(...).
+        'Derivative', 'Subs',
+        # The printer emits this constant BARE (unlike ``sympy.E``, it cannot collide
+        # with a coefficient symbol); without it every expression containing
+        # EulerGamma failed the round-trip and stayed verbose.
+        'EulerGamma',
     )
 
     # Map targets that must NOT be exposed as bare names: the generated header binds
@@ -219,9 +303,12 @@ class FFLConverter:
         return registry
 
     @classmethod
-    def generated_code_sympy_names(cls) -> Dict[str, Any]:
+    def generated_code_sympy_names(cls, standard_sympy: bool = False) -> Dict[str, Any]:
         """SINGLE SOURCE OF TRUTH for the bare SymPy names available in generated rule
         code -- and therefore in the shortening eval namespace.
+
+        *standard_sympy* adds the names only the standard-SymPy mode can emit; the
+        default set is frozen (see ``STANDARD_SYMPY_FUNC_MAP``).
 
         Both :attr:`_eval_ns` (used to verify a shortened form re-evaluates equal) AND
         the generated-file ``from sympy import (...)`` header (see
@@ -238,11 +325,17 @@ class FFLConverter:
         classes rewrite them (list->tuple, ``And``->``&``).
         """
         names: Dict[str, Any] = {}
+        targets = list(cls.SYMPY_FUNC_MAP.values()) + list(cls.SYMPY_LOGIC_MAP.values())
+        extras: Tuple[str, ...] = cls._GENERATED_SYMPY_EXTRAS
+        if standard_sympy:
+            targets += list(cls.STANDARD_SYMPY_FUNC_MAP.values())
+            extras += cls._STANDARD_SYMPY_EXTRAS
         # Functions and relational heads reachable through the translation maps. The
         # CONSTANT_MAP is deliberately NOT included: pi/I/oo are covered by the extras
         # below, while E / EulerGamma stay qualified (``sympy.E``) -- a bare ``E`` would
         # both be dead weight and risk colliding with a coefficient symbol named E.
-        for target in list(cls.SYMPY_FUNC_MAP.values()) + list(cls.SYMPY_LOGIC_MAP.values()):
+        # (Standard-SymPy mode adds EulerGamma, see _STANDARD_SYMPY_EXTRAS.)
+        for target in targets:
             if not target.startswith('sympy.'):
                 continue
             bare = target.split('.', 1)[1]
@@ -251,7 +344,7 @@ class FFLConverter:
             obj = getattr(sympy, bare, None)
             if obj is not None:
                 names[bare] = obj
-        for bare in cls._GENERATED_SYMPY_EXTRAS:
+        for bare in extras:
             obj = getattr(sympy, bare, None)
             if obj is not None:
                 names[bare] = obj
@@ -282,8 +375,13 @@ class FFLConverter:
         custom_functions: Optional[Dict[str, "FFLConverter.CustomFuncEntry"]] = None,
         extra_sympy_funcs: Optional[Dict[str, str]] = None,
         extra_constants: Optional[Dict[str, str]] = None,
+        standard_sympy: bool = False,
     ) -> None:
         self._reserved_symbols: Dict[str, str] = dict(reserved_symbols or {})
+        # Translate every head with a standard SymPy equivalent to it (see
+        # STANDARD_SYMPY_FUNC_MAP). Off by default: the default translation is
+        # frozen so generated rule sets do not change.
+        self.standard_sympy: bool = standard_sympy
         # Per-rule wildcard tracking (reset per rule via reset())
         self._wildcards_non_optional: Set[str] = set()
         self._wildcards_optional: Set[str] = set()
@@ -298,6 +396,8 @@ class FFLConverter:
         self._custom_functions: Dict[str, Tuple[str, Any]] = custom_functions or {}
 
         self.func_map: Dict[str, str] = {**self.SYMPY_FUNC_MAP, **self.SYMPY_LOGIC_MAP}
+        if standard_sympy:
+            self.func_map = {**self.func_map, **self.STANDARD_SYMPY_FUNC_MAP}
         # Allow caller to extend the maps
         if extra_sympy_funcs:
             self.func_map = {**self.func_map, **extra_sympy_funcs}
@@ -317,7 +417,7 @@ class FFLConverter:
             # Every SymPy function/constant the generated code may reference unqualified,
             # from the SINGLE SOURCE shared with the generated-file import header, so the
             # two never drift (see generated_code_sympy_names).
-            **self.generated_code_sympy_names(),
+            **self.generated_code_sympy_names(standard_sympy),
             # The Wolfram runtime library, so the shortening round-trip can eval a
             # node the emitter just wrote. Without this, any rule mentioning e.g.
             # ProductLog failed to eval and silently kept its VERBOSE form.
@@ -427,6 +527,16 @@ class FFLConverter:
 
         head = ffl[0]
 
+        # -- Derivative[n, ...][f][args] (f'[x], f''[x]) --------------------------
+        # A nested head: the parser gives [[['Derivative', '1'], 'f'], 'x']. With
+        # non-negative integer orders this is sympy.Derivative(f(args), (arg, n), ...).
+        # Symbolic or negative orders (Derivative[m][f], Mathematica's antiderivative
+        # Derivative[-1][f]) have no SymPy counterpart and fall through to the error.
+        if self.standard_sympy:
+            deriv = self._derivative_to_code(head, ffl[1:], is_pattern)
+            if deriv is not None:
+                return deriv
+
         # Non-string head (e.g., F_[x_]) -- unsupported
         if not isinstance(head, str):
             raise ValueError(
@@ -496,6 +606,17 @@ class FFLConverter:
                 return f'sympy.atan2({y_arg}, {x_arg})'
             arg = self.convert(ffl[1], is_pattern=is_pattern)
             return f'sympy.atan({arg})'
+
+        # -- Log (1 or 2 args) -------------------------------------------------
+        # Mathematica Log[b, z] is the logarithm of z to base b; SymPy's log(z, b)
+        # takes the same two arguments in the OPPOSITE order. The bare name mapping
+        # emits log(b, z) == log(b)/log(z), the reciprocal -- kept in the default
+        # mode (frozen), corrected in standard-SymPy mode.
+        if (self.standard_sympy and head == 'Log' and len(ffl) == 3
+                and 'Log' not in self._custom_functions):
+            base = self.convert(ffl[1], is_pattern=is_pattern)
+            z = self.convert(ffl[2], is_pattern=is_pattern)
+            return f'sympy.log({z}, {base})'
 
         # -- Hypergeometric2F1 -------------------------------------------------
         if head == 'Hypergeometric2F1' and len(ffl) == 5:
@@ -820,6 +941,42 @@ class FFLConverter:
         args = [self.convert(a, is_pattern=is_pattern) for a in ffl[1:]]
         return f"Lambda({', '.join(args)})"
 
+    def _derivative_to_code(self, head, args, is_pattern: bool) -> Optional[str]:  # noqa: C901
+        """Code for ``Derivative[n1, ...][f][args]``, or None if *head* is not one."""
+        if not (isinstance(head, list) and len(head) == 2
+                and isinstance(head[0], list) and head[0] and head[0][0] == 'Derivative'
+                and isinstance(head[1], str)):
+            return None
+        orders = head[0][1:]
+        if len(orders) != len(args) or not all(
+                isinstance(o, str) and o.isdigit() for o in orders):
+            return None
+        arg_codes = [self.convert(a, is_pattern=is_pattern) for a in args]
+        if not any(int(o) for o in orders):
+            return f"{self.convert([head[1]] + list(args), is_pattern=is_pattern)}"
+        if all(isinstance(a, str) and not _is_numeric_atom(a) for a in args):
+            # f'[x]: differentiate with respect to the symbol itself.
+            func = self.convert([head[1]] + list(args), is_pattern=is_pattern)
+            spec = [f"({a}, {int(o)})" for a, o in zip(arg_codes, orders) if int(o) > 0]
+            return f"sympy.Derivative({func}, {', '.join(spec)})"
+        # f'[Sin[x]]: the derivative of f evaluated AT sin(x). SymPy cannot
+        # differentiate with respect to sin(x); the faithful form is the one its own
+        # diff() produces, Subs(Derivative(f(_xi_1), _xi_1), _xi_1, sin(x)). The
+        # dummies are plain Symbols (a Dummy would not round-trip through printing)
+        # registered like any other symbol so the shortening namespace knows them.
+        dummies = []
+        for i in range(len(args)):
+            name = f'_xi_{i + 1}'
+            self._symbols.add(name)
+            self._eval_ns.setdefault(name, Symbol(name))
+            dummies.append(f"Symbol('{name}')")
+        func = f"sympy.Function('{head[1]}')({', '.join(dummies)})"
+        spec = [f"({d}, {int(o)})" for d, o in zip(dummies, orders) if int(o) > 0]
+        deriv = f"sympy.Derivative({func}, {', '.join(spec)})"
+        if len(args) == 1:
+            return f"sympy.Subs({deriv}, {dummies[0]}, {arg_codes[0]})"
+        return f"sympy.Subs({deriv}, ({', '.join(dummies)}), ({', '.join(arg_codes)}))"
+
     @staticmethod
     def _collect_slots(ffl) -> Set[str]:
         """Recursively collect all Slot numbers from an FFL subtree."""
@@ -845,6 +1002,7 @@ def ffl_to_sympy_code(
     custom_functions: Optional[CustomFunctionsDict] = None,
     wildcards: Optional[Set[str]] = None,
     optional_wildcards: Optional[Set[str]] = None,
+    standard_sympy: bool = False,
 ) -> Tuple[str, List[str], list[str]]:
     """Convert a Full-Form List to an eval-able Python code string.
 
@@ -896,7 +1054,8 @@ def ffl_to_sympy_code(
     x**2
     """
     converter = FFLConverter(reserved_symbols=reserved_symbols,
-                             custom_functions=custom_functions)
+                             custom_functions=custom_functions,
+                             standard_sympy=standard_sympy)
     if wildcards:
         converter._wildcards_non_optional.update(wildcards)
     if optional_wildcards:
@@ -934,7 +1093,8 @@ def ffl_to_sympy_code(
 
 def _simplify_code(code: str, ns: Dict[str, Any],
                    str_printer: Optional[StrPrinter] = None,
-                   rewrite: Optional[Any] = None) -> str:
+                   rewrite: Optional[Any] = None,
+                   standard_sympy: bool = False) -> str:
     """Shorten *code* by round-tripping it through a printer, when that is safe.
 
     ``eval`` the code, print the resulting object with *str_printer*, and keep the
@@ -959,6 +1119,26 @@ def _simplify_code(code: str, ns: Dict[str, Any],
             # verifies the printed text against `obj`, so rewriting afterwards would
             # always compare unequal and silently discard the result.
             obj = rewrite(obj)
+        # Standard-SymPy mode only (the default printing is frozen): an undefined
+        # function the namespace does not know (a Rubi marker such as
+        # Unintegrable[...], an arbitrary F[x]) prints bare as ``Unintegrable(...)``,
+        # which the round-trip cannot evaluate -- so the WHOLE expression stayed
+        # verbose, and the rewrite above was silently lost with it. Print those heads
+        # qualified instead; placeholders the caller registered (FreeQ, ...) are in
+        # the namespace and keep their bare call-form. Likewise a plain Symbol whose
+        # name the namespace binds to something else (a coefficient ``D`` vs the
+        # Wolfram ``D`` node), and Euler's number, which is not in the namespace.
+        if (standard_sympy and isinstance(obj, sympy.Basic)
+                and isinstance(printer, _WildStrPrinter)):
+            unknown = frozenset(type(f).__name__ for f in obj.atoms(AppliedUndef)
+                                if type(f).__name__ not in ns)
+            shadowed = frozenset(
+                s_.name for s_ in obj.atoms(Symbol)
+                if type(s_) is Symbol and s_.name in ns and ns[s_.name] != s_)
+            printer = type(printer)()
+            printer._qualify_undefined = unknown
+            printer._qualify_symbols = shadowed
+            printer._qualify_e = True
         short = printer.doprint(obj)
         recovered = eval(short, ns)
         if isinstance(recovered, sympy.Basic):
@@ -980,6 +1160,7 @@ def ffl_to_sympy_short_code(
     optional_wildcards: Optional[Set[str]] = None,
     str_printer: Optional[StrPrinter] = None,
     rewrite: Optional[Any] = None,
+    standard_sympy: bool = False,
 ) -> Tuple[str, List[str], list[str]]:
     """Like :func:`ffl_to_sympy_code` but with a simplification pass.
 
@@ -987,6 +1168,10 @@ def ffl_to_sympy_short_code(
     is printed -- used by callers that want a deliberate translation baked into the
     emitted code, e.g. ``sympy_wolfram.objects.rewrite_as_standard_sympy`` to turn
     Wolfram nodes into their standard SymPy equivalents.
+
+    *standard_sympy* selects the standard-SymPy translation mode (see
+    :class:`FFLConverter`); it also defaults *rewrite* to
+    ``rewrite_as_standard_sympy`` (pass ``rewrite=lambda e: e`` to keep the nodes).
 
     Operates directly on an FFL structure, skipping Mathematica parsing.
 
@@ -1033,11 +1218,16 @@ def ffl_to_sympy_short_code(
     """
     if namespace is None:
         namespace = {}
+    if standard_sympy and rewrite is None:
+        from sympy_wolfram.objects import rewrite_as_standard_sympy
+        rewrite = rewrite_as_standard_sympy
     code, wild_defs, symbols = ffl_to_sympy_code(
         ffl, reserved_symbols, namespace, custom_functions=custom_functions,
         wildcards=wildcards, optional_wildcards=optional_wildcards,
+        standard_sympy=standard_sympy,
     )
-    return _simplify_code(code, namespace, str_printer, rewrite), wild_defs, symbols
+    return (_simplify_code(code, namespace, str_printer, rewrite, standard_sympy),
+            wild_defs, symbols)
 
 
 # ---------------------------------------------------------------------------
@@ -1050,6 +1240,7 @@ def mathematica_to_sympy_code(
     reserved_symbols: Optional[Mapping[str, str]] = None,
     namespace: Optional[Dict[str, Any]] = None,
     custom_functions: Optional[CustomFunctionsDict] = None,
+    standard_sympy: bool = False,
 ) -> Tuple[str, List[str], list[str]]:
     """Convert a Mathematica expression string to an eval-able Python code string.
 
@@ -1102,7 +1293,8 @@ def mathematica_to_sympy_code(
     """
     ffl = mathematica_to_ffl(expr_str)
     return ffl_to_sympy_code(ffl, reserved_symbols, namespace,
-                             custom_functions=custom_functions)
+                             custom_functions=custom_functions,
+                             standard_sympy=standard_sympy)
 
 
 def mathematica_to_sympy_short_code(
@@ -1111,6 +1303,7 @@ def mathematica_to_sympy_short_code(
     namespace: Optional[Dict[str, Any]] = None,
     custom_functions: Optional[CustomFunctionsDict] = None,
     str_printer: Optional[StrPrinter] = None,
+    standard_sympy: bool = False,
 ) -> Tuple[str, List[str], list[str]]:
     """Like :func:`mathematica_to_sympy_code` but with a simplification pass.
 
@@ -1162,6 +1355,7 @@ def mathematica_to_sympy_short_code(
     return ffl_to_sympy_short_code(
         ffl, reserved_symbols, namespace,
         custom_functions=custom_functions, str_printer=str_printer,
+        standard_sympy=standard_sympy,
     )
 
 
@@ -1170,6 +1364,7 @@ def mathematica_to_sympy(
     reserved_symbols: Optional[Mapping[str, str]] = None,
     namespace: Optional[Dict[str, Any]] = None,
     custom_functions: Optional[CustomFunctionsDict] = None,
+    standard_sympy: bool = False,
 ) -> sympy.Basic:
     """Convert a Mathematica expression string directly to a SymPy object.
 
@@ -1206,6 +1401,7 @@ def mathematica_to_sympy(
     if namespace is None:
         namespace = {}
     code, _wild_defs, _symbols = mathematica_to_sympy_code(
-        expr_str, reserved_symbols, namespace, custom_functions=custom_functions
+        expr_str, reserved_symbols, namespace, custom_functions=custom_functions,
+        standard_sympy=standard_sympy,
     )
     return eval(code, namespace)

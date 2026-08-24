@@ -175,6 +175,36 @@ preserved (`Integer(1)/Integer(4)` is a `Rational`, whereas `1/4` would be a flo
 
 ```
 
+### Two translation modes: deferred nodes vs standard SymPy
+
+By default a head this package implements keeps its own deferred node, and a few
+forms keep their historical translation. That default is **frozen**: it is what
+`rubi_integrate` generates its rule set with, and in a rule the arguments are
+wildcards that may later match any expression — an eager SymPy function could
+evaluate them as if they were constants.
+
+`standard_sympy=True` is for translating plain expressions (a test corpus, an
+answer to compare): every head with a standard SymPy equivalent becomes it, Wolfram
+nodes are rewritten by `rewrite_as_standard_sympy`, and the shortening pass qualifies
+the names its namespace cannot resolve instead of falling back to verbose code.
+
+```python
+>>> from sympy_wolfram import ffl_to_sympy_short_code
+>>> ffl_to_sympy_code(['EllipticPi', 'n', 'm'])[0]
+"EllipticPi(Symbol('n'), Symbol('m'))"
+>>> ffl_to_sympy_code(['EllipticPi', 'n', 'm'], standard_sympy=True)[0]
+"sympy.elliptic_pi(Symbol('n'), Symbol('m'))"
+>>> ffl_to_sympy_short_code(['Gamma', 'a', 'x'], {'x': 'x'})[0]
+'Gamma(a, x)'
+>>> ffl_to_sympy_short_code(['Gamma', 'a', 'x'], {'x': 'x'}, standard_sympy=True)[0]
+'uppergamma(a, x)'
+
+```
+
+Mathematica's `Log[b, z]` is the logarithm of `z` to base `b`; SymPy's `log(z, b)`
+takes the same arguments the other way round. Only the standard mode corrects the
+order — the default keeps the historical `sympy.log(b, z)`.
+
 ---
 
 ## 7. Round trip: translate, then match
