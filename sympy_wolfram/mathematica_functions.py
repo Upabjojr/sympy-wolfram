@@ -452,11 +452,11 @@ class EllipticPi(MathematicaExpr):
             return sympy.elliptic_pi(n, phi, m)
         return self
 
-    def rewrite_as_standard_sympy(self):
-        """Both arities map to ``elliptic_pi``, which is overloaded the same way."""
-        if len(self.args) in (2, 3):
-            return sympy.elliptic_pi(*self.args, evaluate=False)
-        return self
+    # Deliberately NO rewrite_as_standard_sympy: rubi_integrate keeps this node as a
+    # deferred placeholder in its rules exactly because it does not self-translate
+    # (its codegen checks the node's own __dict__). In standard-SymPy mode the
+    # interpreter maps the head straight to sympy.elliptic_pi instead
+    # (FFLConverter.STANDARD_SYMPY_FUNC_MAP), so the node never arises there.
 
 
 class Apply(MathematicaExpr):
