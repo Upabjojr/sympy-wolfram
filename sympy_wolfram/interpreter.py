@@ -95,6 +95,15 @@ class _WildStrPrinter(StrPrinter):
 _wild_printer = _WildStrPrinter()
 
 
+def _is_numeric_atom(atom: str) -> bool:
+    """True for an FFL atom that is a number literal (``'2'``, ``'-1'``, ``'0.5'``)."""
+    try:
+        float(atom)
+        return True
+    except ValueError:
+        return False
+
+
 # =============================================================================
 # FFLConverter
 # =============================================================================
@@ -216,7 +225,7 @@ class FFLConverter:
         # discarded.
         'Ei', 'li', 'LambertW',
         'gamma', 'uppergamma', 'factorial', 'zeta', 'polygamma', 'besselj', 'expint',
-        'elliptic_pi', 'Derivative',
+        'elliptic_pi', 'Derivative', 'Subs',
         # The printer emits this constant BARE (unlike ``sympy.E``, it cannot collide
         # with a coefficient symbol); without it every expression containing
         # EulerGamma failed the round-trip and stayed verbose.
@@ -878,7 +887,7 @@ class FFLConverter:
         args = [self.convert(a, is_pattern=is_pattern) for a in ffl[1:]]
         return f"Lambda({', '.join(args)})"
 
-    def _derivative_to_code(self, head, args, is_pattern: bool) -> Optional[str]:
+    def _derivative_to_code(self, head, args, is_pattern: bool) -> Optional[str]:  # noqa: C901
         """Code for ``Derivative[n1, ...][f][args]``, or None if *head* is not one."""
         if not (isinstance(head, list) and len(head) == 2
                 and isinstance(head[0], list) and head[0] and head[0][0] == 'Derivative'
@@ -888,12 +897,31 @@ class FFLConverter:
         if len(orders) != len(args) or not all(
                 isinstance(o, str) and o.isdigit() for o in orders):
             return None
-        func = self.convert([head[1]] + list(args), is_pattern=is_pattern)
         arg_codes = [self.convert(a, is_pattern=is_pattern) for a in args]
-        spec = [f"({a}, {int(o)})" for a, o in zip(arg_codes, orders) if int(o) > 0]
-        if not spec:
-            return func
-        return f"sympy.Derivative({func}, {', '.join(spec)})"
+        if not any(int(o) for o in orders):
+            return f"{self.convert([head[1]] + list(args), is_pattern=is_pattern)}"
+        if all(isinstance(a, str) and not _is_numeric_atom(a) for a in args):
+            # f'[x]: differentiate with respect to the symbol itself.
+            func = self.convert([head[1]] + list(args), is_pattern=is_pattern)
+            spec = [f"({a}, {int(o)})" for a, o in zip(arg_codes, orders) if int(o) > 0]
+            return f"sympy.Derivative({func}, {', '.join(spec)})"
+        # f'[Sin[x]]: the derivative of f evaluated AT sin(x). SymPy cannot
+        # differentiate with respect to sin(x); the faithful form is the one its own
+        # diff() produces, Subs(Derivative(f(_xi_1), _xi_1), _xi_1, sin(x)). The
+        # dummies are plain Symbols (a Dummy would not round-trip through printing)
+        # registered like any other symbol so the shortening namespace knows them.
+        dummies = []
+        for i in range(len(args)):
+            name = f'_xi_{i + 1}'
+            self._symbols.add(name)
+            self._eval_ns.setdefault(name, Symbol(name))
+            dummies.append(f"Symbol('{name}')")
+        func = f"sympy.Function('{head[1]}')({', '.join(dummies)})"
+        spec = [f"({d}, {int(o)})" for d, o in zip(dummies, orders) if int(o) > 0]
+        deriv = f"sympy.Derivative({func}, {', '.join(spec)})"
+        if len(args) == 1:
+            return f"sympy.Subs({deriv}, {dummies[0]}, {arg_codes[0]})"
+        return f"sympy.Subs({deriv}, ({', '.join(dummies)}), ({', '.join(arg_codes)}))"
 
     @staticmethod
     def _collect_slots(ffl) -> Set[str]:

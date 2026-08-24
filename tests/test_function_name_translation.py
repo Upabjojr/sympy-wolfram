@@ -262,6 +262,22 @@ class TestDerivativeHead:
     def test_order_zero_is_the_function_itself(self):
         assert self._eval_with_f([[['Derivative', '0'], 'f'], 'x']) == sympy.Function('f')(x)
 
+    def test_derivative_at_a_non_symbol_argument_is_a_subs(self):
+        # 8.10 Formal derivatives: f'[Sin[x]]. SymPy cannot differentiate with respect
+        # to sin(x); the faithful form is the one diff() itself produces.
+        f = sympy.Function('f')
+        got = self._eval_with_f([[['Derivative', '1'], 'f'], ['Sin', 'x']])
+        assert isinstance(got, sympy.Subs)
+        assert got == sympy.diff(f(sympy.sin(x)), x) / sympy.cos(x)
+        assert got.doit() == sympy.diff(f(sympy.sin(x)), x) / sympy.cos(x)
+
+    def test_subs_form_is_shortened_and_declares_its_dummy(self):
+        ns = {}
+        code, _, symbols = ffl_to_sympy_short_code(
+            [[['Derivative', '2'], 'f'], ['Power', 'x', '2']], {'x': 'x'}, ns)
+        assert code == "Subs(Derivative(sympy.Function('f')(_xi_1), (_xi_1, 2)), _xi_1, x**2)"
+        assert '_xi_1' in symbols and eval(code, ns).doit() == eval(code, ns)
+
     def test_symbolic_and_negative_orders_are_still_rejected(self):
         import pytest
         c = FFLConverter(reserved_symbols={'x': 'x'})
