@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sympy-wolfram"
-version = "0.0.3"
+version = "0.0.4"
 description = "Wolfram-language semantics on SymPy: deferred nodes, eager evaluators, FFL interpreter and constraints"
 readme = "README.md"
 license = {file = "LICENSE"}
