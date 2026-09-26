@@ -31,8 +31,6 @@ from sympy.printing.str import StrPrinter
 from sympy_matching.wild import (HeadRef, IDENTITY_ELEMENT, WildHeadApp, WildHeadDeriv,
                                  WildSymbol)
 
-from .parser import mathematica_to_ffl
-
 # Type alias for the custom_functions dict expected by the public APIs.
 # Maps Wolfram head name -> (qualified_code_str, python_object)
 CustomFunctionsDict = Dict[str, Tuple[str, Any]]
@@ -1100,6 +1098,7 @@ def mathematica_to_sympy_code(
     >>> defs
     ["m_ = WildSymbol('m')"]
     """
+    from .parser import mathematica_to_ffl  # text parsing needs sympy >= 1.15
     ffl = mathematica_to_ffl(expr_str)
     return ffl_to_sympy_code(ffl, reserved_symbols, namespace,
                              custom_functions=custom_functions)
@@ -1158,6 +1157,7 @@ def mathematica_to_sympy_short_code(
     >>> short
     '(a + b*x)**m'
     """
+    from .parser import mathematica_to_ffl  # text parsing needs sympy >= 1.15
     ffl = mathematica_to_ffl(expr_str)
     return ffl_to_sympy_short_code(
         ffl, reserved_symbols, namespace,

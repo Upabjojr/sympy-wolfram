@@ -10,6 +10,9 @@ The package is split by ROLE, in pipeline order:
 ``parser``
     Mathematica source text -> Full-Form List (FFL). Pure syntax: every node is a
     plain string head with plain arguments, and no meaning is assigned.
+    Not imported by the package (it needs sympy's Mathematica parser, only
+    required to parse source text): ``from sympy_wolfram.parser import
+    mathematica_to_ffl``.
 
 ``interpreter``
     FFL -> SymPy code strings and objects. This is where meaning is assigned:
@@ -22,7 +25,6 @@ The package is split by ROLE, in pipeline order:
     Wolfram constructs that have no direct SymPy equivalent and are modelled here.
 """
 
-from .parser import mathematica_to_ffl
 from .interpreter import (
     FFLConverter,
     ffl_to_sympy_code,
@@ -82,8 +84,6 @@ from .mathematica_functions import (
 )
 
 __all__ = [
-    # parser: text -> FFL
-    'mathematica_to_ffl',
     # interpreter: FFL -> SymPy
     'FFLConverter',
     'ffl_to_sympy_code', 'ffl_to_sympy_short_code',
