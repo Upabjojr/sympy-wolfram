@@ -16,8 +16,8 @@ from sympy import (
     simplify, pi, oo, S, atan, asin, acos, Function,
 )
 
+from sympy_wolfram.parser import mathematica_to_ffl
 from sympy_wolfram.interpreter import (
-    mathematica_to_ffl,
     mathematica_to_sympy_code,
     mathematica_to_sympy_short_code,
     mathematica_to_sympy,
