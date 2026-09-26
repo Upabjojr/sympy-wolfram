@@ -17,6 +17,10 @@ requires-python = ">=3.10"
 dependencies = [
     "sympy-matching>=0.0.3",
     "omnimatch",
+    # Works with released sympy (<= 1.14). Only parsing Mathematica source text
+    # (parser.mathematica_to_ffl) needs sympy >= 1.15 -- for
+    # sympy.parsing.mathematica.parse_mathematica_to_fullformlist, unreleased at
+    # the time of writing (use sympy's master branch); it is imported lazily.
     "sympy",
 ]
 

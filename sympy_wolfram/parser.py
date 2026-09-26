@@ -14,14 +14,26 @@ from __future__ import annotations
 from typing import List
 
 # ``parse_mathematica_to_fullformlist`` is not part of released sympy (it
-# exists in sympy 1.15.0.dev); guard the import so this package works on stock
-# sympy -- the FFL parser is only needed at rule-GENERATION time, never for
-# integration, so the failure is deferred to the actual call with a clear
-# message instead of breaking ``import sympy_wolfram`` for everyone.
-try:
-    from sympy.parsing.mathematica import parse_mathematica_to_fullformlist
-except ImportError:  # pragma: no cover -- depends on installed sympy version
-    parse_mathematica_to_fullformlist = None
+# exists in sympy 1.15.0.dev). The FFL parser is only needed at rule-GENERATION
+# time, never for integration, so ``sympy.parsing.mathematica`` is imported
+# LAZILY, on first use: ``import sympy_wolfram`` never touches sympy's parsers,
+# and on stock sympy the failure surfaces at the actual call with a clear
+# message.
+def _load_fullformlist_parser():
+    """Return sympy's ``parse_mathematica_to_fullformlist``, or None if absent."""
+    try:
+        from sympy.parsing.mathematica import parse_mathematica_to_fullformlist
+    except ImportError:  # pragma: no cover -- depends on installed sympy version
+        return None
+    return parse_mathematica_to_fullformlist
+
+
+def __getattr__(name):
+    # Keeps ``from sympy_wolfram.parser import parse_mathematica_to_fullformlist``
+    # working (None on sympy versions without it) without an eager import.
+    if name == 'parse_mathematica_to_fullformlist':
+        return _load_fullformlist_parser()
+    raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
 
 
 def mathematica_to_ffl(expr_str: str) -> List:
@@ -46,6 +58,7 @@ def mathematica_to_ffl(expr_str: str) -> List:
     >>> mathematica_to_ffl("Sin[x] + 1")
     ['Plus', ['Sin', 'x'], '1']
     """
+    parse_mathematica_to_fullformlist = _load_fullformlist_parser()
     if parse_mathematica_to_fullformlist is None:
         raise RuntimeError(
             'mathematica_to_ffl requires sympy.parsing.mathematica.'
